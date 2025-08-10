@@ -4,6 +4,8 @@ requests>=2.31
 plotly>=5.22
 pandas>=2.2
 numpy>=1.26
+scipy>=1.13
+arch>=6.3
 
 # --- PDF parsing & RAG ---
 pymupdf>=1.23           # PyMuPDF

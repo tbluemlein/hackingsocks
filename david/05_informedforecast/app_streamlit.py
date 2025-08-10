@@ -27,6 +27,7 @@ try:
         fetch_alpha_vantage_free,
         parse_horizon,
         exp_smoothing_forecast,
+        garch_price_forecast
     )
     HAS_MARKET = True
 except Exception:
@@ -284,7 +285,8 @@ with tab_market:
                 if dfp is None:
                     dfp = cached_av(st.session_state.get("mdf_ticker"), av_api_key, granularity, outputsize)
                 with st.spinner("Fitting Exponential Smoothing…"):
-                    fc = exp_smoothing_forecast(dfp, value_col="close", periods=int(st.session_state.get("mdf_periods")))
+                    #fc = exp_smoothing_forecast(dfp, value_col="close", periods=int(st.session_state.get("mdf_periods")))
+                    fc = garch_price_forecast(dfp, value_col="close", periods=int(st.session_state.get("mdf_periods")))
                 fig2 = go.Figure()
                 fig2.add_trace(go.Scatter(x=dfp["date"], y=dfp["close"], mode="lines", name="History"))
                 fig2.add_trace(go.Scatter(x=fc["date"], y=fc["yhat"], mode="lines", name="Forecast"))
@@ -339,7 +341,7 @@ with tab_strategy:
             return fetch_alpha_vantage_free(symbol, av_api_key, granularity="daily", outputsize="compact")
 
         def base_forecast(df, periods):
-            return exp_smoothing_forecast(df, value_col="close", periods=int(periods))
+            return garch_price_forecast(df, value_col="close", periods=int(periods))
 
         def retrieve_docs(query_text, kdocs, where):
             if not st.session_state.collection:

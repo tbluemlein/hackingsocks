@@ -161,3 +161,98 @@ def exp_smoothing_forecast(df_prices: pd.DataFrame, value_col: str = "adjusted_c
         "yhat_upper": yhat.values + z * sigma,
     })
     return out
+
+
+
+
+def garch_price_forecast(
+    df_prices: pd.DataFrame,
+    value_col: str = "adjusted_close",
+    periods: int = 20,
+    vol: str = "EGARCH",          # 'GARCH', 'EGARCH', 'GJR-GARCH', etc.
+    p: int = 1,
+    o: int = 0,                   # EGARCH/GJR needs o>=1 for asymmetry; keep 0 for plain GARCH
+    q: int = 1,
+    mean: str = "Constant",       # 'Zero', 'Constant', 'ARX'
+    dist: str = "normal",         # 'normal', 't', 'skewt'
+    alpha: float = 0.05,          # 95% interval by default
+    scale_returns: float = 1.0,   # set to 100.0 if you prefer returns in %
+    reindex_to_bdays: bool = True # create business-day future index like your ES function
+) -> pd.DataFrame:
+    """
+    Fit an ARCH-family model on log returns and map the step-ahead return forecasts
+    to price forecasts (median yhat) and a two-sided (1-alpha) interval under
+    the model's conditional distribution.
+
+    Returns: DataFrame[date, yhat, yhat_lower, yhat_upper] (prices)
+    """
+
+    if value_col not in df_prices.columns:
+        raise ValueError(f"{value_col} not found in df_prices")
+    if len(df_prices) < 50:
+        raise ValueError("Need at least ~50 observations to fit a GARCH model reliably.")
+
+    # 1) Prep series
+    px = df_prices[["date", value_col]].dropna().copy()
+    px["date"] = pd.to_datetime(px["date"])
+    px = px.sort_values("date").reset_index(drop=True)
+    last_date = px["date"].iloc[-1]
+    last_price = float(px[value_col].iloc[-1])
+
+    # log returns (natural); scale if you like (%)
+    r = np.log(px[value_col]).diff().dropna()
+    r = r * scale_returns
+    r.index = px["date"].iloc[1:]  # align dates
+
+    # 2) Fit ARCH-family model to returns
+    am = arch_model(r, mean=mean, vol=vol, p=p, o=o, q=q, dist=dist, rescale=False)
+    res = am.fit(disp="off")
+
+    # 3) Step-ahead forecasts for mean and variance of *returns*
+    #    (These are conditional on information at t.)
+    fcast = res.forecast(horizon=periods, reindex=False)
+
+    # Mean forecast of returns (shape: 1 x periods)
+    # Some mean specs (e.g., 'Zero') will give 0s here, which is fine.
+    mu_step = np.asarray(fcast.mean.values[-1, :], dtype=float)  # step-wise
+    # Variance forecast of returns
+    var_step = np.asarray(fcast.variance.values[-1, :], dtype=float)
+
+    # 4) Undo scaling back to log-return units
+    mu_step = mu_step / scale_returns
+    var_step = var_step / (scale_returns ** 2)
+
+    # 5) Convert step-wise (mu_t, var_t) into cumulative to map to prices
+    #    Under conditional normality: sum of normals -> Normal(sum mu, sum var)
+    cum_mu = np.cumsum(mu_step)
+    cum_var = np.cumsum(var_step)
+
+    # 6) Build future business-day index
+    if reindex_to_bdays:
+        future_idx = pd.bdate_range(start=last_date + pd.offsets.BDay(), periods=periods)
+    else:
+        # Just add 1..periods days
+        future_idx = pd.date_range(start=last_date + pd.Timedelta(days=1), periods=periods, freq="D")
+
+    # 7) Price mapping:
+    #    log P_{t+h} ~ Normal( log P_t + cum_mu[h], cum_var[h] )
+    #    Median price (yhat) = exp( E[log P] ) = P_t * exp(cum_mu)
+    #    Mean price would be P_t * exp(cum_mu + 0.5*cum_var) — we use median for robustness.
+    z = norm.ppf(1 - alpha/2.0)
+
+    logP0 = np.log(last_price)
+    log_med = logP0 + cum_mu
+    log_lo  = logP0 + cum_mu - z * np.sqrt(cum_var)
+    log_hi  = logP0 + cum_mu + z * np.sqrt(cum_var)
+
+    yhat        = np.exp(log_med)
+    yhat_lower  = np.exp(log_lo)
+    yhat_upper  = np.exp(log_hi)
+
+    out = pd.DataFrame({
+        "date": future_idx,
+        "yhat": yhat,
+        "yhat_lower": yhat_lower,
+        "yhat_upper": yhat_upper,
+    })
+    return out
